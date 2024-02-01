@@ -4,6 +4,8 @@ import sys
 import time
 import os
 
+import select
+
 default_timer = time.time
 
 ICMP_MODE = socket.getprotobyname("icmp")
@@ -11,34 +13,33 @@ PACKET_SIZE = 64
 WAIT_TIMEOUT = 3000.0
 MAX_SLEEP = 1000
 
-ICMP_ECHO_REPLY = 0  # Echo reply (per RFC792)
-ICMP_ECHO = 8  # Echo request (per RFC792)
-ICMP_MAX_RECV = 2048  # Max size of incoming buffer
+ICMP_ECHO_REPLY = 0
+ICMP_ECHO = 8
+ICMP_MAX_RECV = 2048
 
 
 class Ping:
     def __init__(self, packet_num, hostname):
         self.destination_ip = None
-        self.server_socket = self.create_socket()
+        self.server_socket = None
+
         self.packet_num = packet_num
         self.hostname = hostname
         self._id = os.getpid() & 0xFFFF
 
     def create_socket(self):
         try:
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, ICMP_MODE)
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, ICMP_MODE)
         except socket.error as e:
             print(f"failed. (socket error: {e.args[1]})")
             raise
-
-        return server_socket
 
     def calculate_ping(self):
         try:
             self.destination_ip = socket.gethostbyname(self.hostname)
             print(f"Ping {self.hostname}")
             print(f"Destination IP: {self.destination_ip}")
-            print(f"Packet size: {PACKET_SIZE}")
+            print(f"Packet size: {PACKET_SIZE}\n\n")
         except socket.gaierror as e:
             print(f"\nError: Unknown host: {self.hostname} ({e.args[1]})")
             return
@@ -59,15 +60,27 @@ class Ping:
     def get_ping(self, sequence_count):
         delay = None
 
-        sent_time = self.send_one_ping(sequence_count)
+        self.create_socket()
+        sent_time = self.send_packet(sequence_count)
 
         if sent_time is None:
             self.server_socket.close()
             return delay
 
+        recv_time = self.receive_packet()
+        self.server_socket.close()
+
+        if recv_time:
+            delay = (recv_time - sent_time) * 1000
+            print(f"Ping successful: time={round(delay, 2)}")
+
+        else:
+            delay = None
+            print("Ping Timed out")
+
         return delay
 
-    def send_one_ping(self, sequence_count):
+    def send_packet(self, sequence_count):
         checksum_num = 0
 
         header = struct.pack("!BBHHH", ICMP_ECHO, 0, checksum_num, self._id, sequence_count)
@@ -81,8 +94,7 @@ class Ping:
             data = struct.pack("d", default_timer()) + data
         else:
             for i in range(start_val, start_val + (PACKET_SIZE - 8)):
-                pad_bytes += [(i & 0xff)]  # Keep chars in the 0-255 range
-            # data = bytes(pad_bytes)
+                pad_bytes += [(i & 0xff)]
             data = bytearray(pad_bytes)
 
         checksum_num = self.checksum(header + data)
@@ -96,10 +108,36 @@ class Ping:
         try:
             self.server_socket.sendto(packet, (self.destination_ip, 1))
         except socket.error as e:
-            print("General failure (%s)" % (e.args[1]))
+            print(f"General failure ({e.args[1]})")
             return
 
         return send_time
+
+    def receive_packet(self):
+
+        time_left = WAIT_TIMEOUT / 1000
+
+        while True:
+            started_select = default_timer()
+            what_ready = select.select([self.server_socket], [], [], time_left)
+            how_long_in_select = (default_timer() - started_select)
+
+            if not what_ready[0]:  # Timeout
+                return None, 0, 0, 0, 0
+
+            time_received = default_timer()
+
+            rec_packet, addr = self.server_socket.recvfrom(ICMP_MAX_RECV)
+
+            icmp_header = rec_packet[20:28]
+            icmp_packet = struct.unpack("!BBHHH", icmp_header)
+
+            if icmp_packet[3] == self._id:  # Our packet
+                return time_received
+
+            time_left = time_left - how_long_in_select
+            if time_left <= 0:
+                return None, 0, 0, 0, 0
 
     def checksum(self, source_string):
         count_to = (int(len(source_string) / 2)) * 2
