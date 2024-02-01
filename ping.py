@@ -22,6 +22,7 @@ class Ping:
         self.server_socket = self.create_socket()
         self.packet_num = packet_num
         self.hostname = hostname
+        self._id = os.getpid() & 0xFFFF
 
     def create_socket(self):
         try:
@@ -58,20 +59,18 @@ class Ping:
     def get_ping(self, sequence_count):
         delay = None
 
-        my_id = os.getpid() & 0xFFFF
-
-        sent_time = self.send_one_ping(my_id, sequence_count)
+        sent_time = self.send_one_ping(sequence_count)
 
         if sent_time is None:
             self.server_socket.close()
-            return None
+            return delay
 
         return delay
 
-    def send_one_ping(self, my_id, my_seq_number):
-        my_checksum = 0
+    def send_one_ping(self, sequence_count):
+        checksum_num = 0
 
-        header = struct.pack("!BBHHH", ICMP_ECHO, 0, my_checksum, my_id, my_seq_number)
+        header = struct.pack("!BBHHH", ICMP_ECHO, 0, checksum_num, self._id, sequence_count)
 
         pad_bytes = []
         start_val = 0x42
@@ -82,15 +81,54 @@ class Ping:
             data = struct.pack("d", default_timer()) + data
         else:
             for i in range(start_val, start_val + (PACKET_SIZE - 8)):
-                pad_bytes += [(i & 0xff)]
+                pad_bytes += [(i & 0xff)]  # Keep chars in the 0-255 range
+            # data = bytes(pad_bytes)
             data = bytearray(pad_bytes)
+
+        checksum_num = self.checksum(header + data)
+
+        header = struct.pack("!BBHHH", ICMP_ECHO, 0, checksum_num, self._id, sequence_count)
+
+        packet = header + data
 
         send_time = default_timer()
 
         try:
-            self.server_socket.sendto(data, (self.destination_ip, 1))  # Port number is irrelevant for ICMP
+            self.server_socket.sendto(packet, (self.destination_ip, 1))
         except socket.error as e:
-            print(f"General failure ({e.args[1]})")
+            print("General failure (%s)" % (e.args[1]))
             return
 
         return send_time
+
+    def checksum(self, source_string):
+        count_to = (int(len(source_string) / 2)) * 2
+        summ = 0
+        count = 0
+
+        low_byte = 0
+        high_byte = 0
+        while count < count_to:
+            if sys.byteorder == "little":
+                low_byte = source_string[count]
+                high_byte = source_string[count + 1]
+            else:
+                low_byte = source_string[count + 1]
+                high_byte = source_string[count]
+
+            summ = summ + (high_byte * 256 + low_byte)
+
+            count += 2
+
+        if count_to < len(source_string):
+            low_byte = source_string[len(source_string) - 1]
+            summ += low_byte
+
+        summ &= 0xffffffff
+
+        summ = (summ >> 16) + (summ & 0xffff)
+        summ += (summ >> 16)
+        answer = ~summ & 0xffff
+        answer = socket.htons(answer)
+
+        return answer
