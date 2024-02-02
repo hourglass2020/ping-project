@@ -113,11 +113,11 @@ class Ping:
         time_left = WAIT_TIMEOUT / 1000
 
         while True:
-            started_select = time.time()
-            what_ready = select.select([self.server_socket], [], [], time_left)
-            how_long_in_select = (time.time() - started_select)
+            start_timer = time.time()
+            duration = (time.time() - start_timer)
+            ready = select.select([self.server_socket], [], [], time_left)
 
-            if not what_ready[0]:
+            if not ready[0]:
                 return None, 0, 0, 0, 0
 
             time_received = time.time()
@@ -130,7 +130,7 @@ class Ping:
             if icmp_packet[3] == self._id:  # Our packet
                 return time_received
 
-            time_left = time_left - how_long_in_select
+            time_left = time_left - duration
             if time_left <= 0:
                 return None, 0, 0, 0, 0
 
